@@ -1,0 +1,91 @@
+name: Sync Upstream (koala73/worldmonitor)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/koala73/worldmonitor.git || true
+          git fetch upstream main --tags
+
+      - name: Create sync branch and merge upstream
+        id: merge
+        shell: bash
+        run: |
+          BRANCH="sync/upstream-${GITHUB_RUN_ID}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          git checkout -B "$BRANCH" origin/main
+          set +e
+          git merge --no-ff --no-edit upstream/main
+          MERGE_EXIT=$?
+          set -e
+
+          if [ $MERGE_EXIT -ne 0 ]; then
+            echo "has_conflict=true" >> "$GITHUB_OUTPUT"
+            git merge --abort || true
+            exit 0
+          fi
+
+          if git diff --quiet origin/main...HEAD; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create pull request for upstream sync
+        if: steps.merge.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore(sync): merge upstream/main into fork main'
+          title: 'chore(sync): merge upstream/main into main'
+          body: |
+            自动同步上游仓库更新：
+            - Upstream: `koala73/worldmonitor`
+            - Target branch: `main`
+
+            该 PR 由 GitHub Actions 自动创建，请完成代码审查后合并。
+          branch: ${{ steps.merge.outputs.branch }}
+          base: main
+          labels: |
+            sync
+            upstream
+
+      - name: Report no-op
+        if: steps.merge.outputs.has_changes == 'false'
+        run: echo "No upstream changes to sync."
+
+      - name: Report conflict
+        if: steps.merge.outputs.has_conflict == 'true'
+        run: |
+          echo "Merge conflict detected while syncing upstream/main -> main."
+          echo "Please resolve manually:"
+          echo "  git fetch upstream main"
+          echo "  git checkout main"
+          echo "  git merge upstream/main"
